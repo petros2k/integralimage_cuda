@@ -48,15 +48,15 @@ __global__ void reduction_shfl3( const unsigned char* __restrict__ img, size_t w
 __global__ void reduction_shfl4( cudaTextureObject_t tex, unsigned int *result );
 __global__ void reduction_shfl5( cudaTextureObject_t tex, unsigned int *result );
 
-__global__ void integral_row_naive( const unsigned char* img, size_t w, size_t h, size_t ipitch, size_t opitch, unsigned int *intimg=NULL );
-__global__ void integral_col_naive( const unsigned char* img, size_t w, size_t h, size_t ipitch, size_t opitch, unsigned int *intimg=NULL );
+__global__ void integral_row_naive( const unsigned char* img, size_t w, size_t h, size_t ipitch, size_t opitch, unsigned int *intimg );
+__global__ void integral_col_naive( const unsigned char* img, size_t w, size_t h, size_t ipitch, size_t opitch, unsigned int *intimg );
 
-__global__ void integral_row_shfl ( const Image img, unsigned int **intimg=NULL, unsigned int **block_sum=NULL );
-__global__ void integral_col_shfl ( const Image img, unsigned int **intimg=NULL, unsigned int **block_sum=NULL );
-__global__ void integral_row_shfl_uniform( const Image img, unsigned int **block_sum=NULL );
-__global__ void integral_row_shfl_apply( const Image img, unsigned int **intimg=NULL, unsigned int **block_sum=NULL );
-__global__ void integral_col_shfl_uniform( const Image img, unsigned int **block_sum=NULL );
-__global__ void integral_col_shfl_apply( const Image img, unsigned int **intimg=NULL, unsigned int **block_sum=NULL );
+__global__ void integral_row_shfl ( const unsigned char* img, size_t w, size_t h, size_t ipitch, size_t opitch, unsigned int *intimg, unsigned int *block_sum );
+__global__ void integral_col_shfl ( const unsigned char* img, size_t w, size_t h, size_t ipitch, size_t opitch, unsigned int *intimg, unsigned int *block_sum );
+__global__ void integral_row_shfl_uniform( unsigned int *block_sum );
+__global__ void integral_col_shfl_uniform( unsigned int *block_sum );
+__global__ void integral_row_shfl_apply( size_t w, size_t h, size_t pitch, unsigned int *intimg, unsigned int *block_sum );
+__global__ void integral_col_shfl_apply( size_t w, size_t h, size_t pitch, unsigned int *intimg, unsigned int *block_sum );
 
 __global__ void integral_row_shfl2( const Image img, unsigned int **intimg=NULL, unsigned int **block_sum=NULL );
 __global__ void integral_col_shfl_trans( const Image img, unsigned int **intimg=NULL, unsigned int **block_sum=NULL );
@@ -64,7 +64,7 @@ __global__ void integral_row_shfl_uniform2( const Image img, unsigned int **inti
 __global__ void integral_col_shfl_trans_uniform( const Image img, unsigned int **intimg=NULL, unsigned int **block_sum=NULL );
 
 // kernel description
-const char kernel_desc[][128] =
+const char reduce_kernel_desc[][128] =
 {
 	"naive reduction",
 	"reduction with smem",
@@ -73,6 +73,16 @@ const char kernel_desc[][128] =
 	"reduction with warp-shuffle and vec16",
 	"reduction with warp-shuffle and texture obj 4vec",
 	"reduction with warp-shuffle and texture obj 16vec",
+};
+const char integral_kernel_desc[][128] =
+{
+	"naive integral image",
+	"integral with smem",
+	"integral with simple warp-shuffle",
+	"integral with warp-shuffle and vec4",
+	"integral with warp-shuffle and vec16",
+	"integral with warp-shuffle and texture obj 4vec",
+	"integral with warp-shuffle and texture obj 16vec",
 };
 
 // GPU device functions

@@ -32,13 +32,14 @@ int main(void)
 	res_gpu = reductionGPU( img0, gpu_method );
 
 	printf( "CPU result: %ld\n", res_cpu );
-	printf( "GPU result: %ld (method %d : %s)\n", res_gpu, gpu_method, kernel_desc[gpu_method] );
-
+	printf( "GPU result: %ld (method %d : %s)\n", res_gpu, gpu_method, reduce_kernel_desc[gpu_method] );
+	
+	gpu_method = 2;
 	unsigned int **intimg = NULL;
 	unsigned int **d_intimg = NULL;
 	if (!integralImageCPU( img0, &intimg ))
 		printf( "Integral Image CPU failed.\n" );
-	if (!integralImageGPU( img0, &d_intimg ))
+	if (!integralImageGPU( img0, &d_intimg, gpu_method ))
 		printf( "Integral Image GPU failed.\n" );
 
 	bool eq = true;
@@ -55,6 +56,11 @@ int main(void)
 		}
 	}
 	printf( "result %s, diff=%d\n", eq==true?"success":"failure", diff );
+
+	freeIntImg( intimg );
+	freeIntImg( d_intimg );
+	free( img0.img[0] );
+	free( img0.img );
 
 	cudaDeviceReset();
 
@@ -535,15 +541,15 @@ bool integralImageGPU( const Image img, unsigned int ***intimg, int method )
 			__CUDA( cudaMemset2D( dp_intg, opitch, 0, img.w, img.h ) );
 			integral_row_naive<<< gridDim, blockDim >>>( d_img, img.w, img.h,
 						ipitch, opitch, dp_intg );
-#ifdef _DEBUG
+			#ifdef _DEBUG
 			__CUDA( cudaDeviceSynchronize() );
-#endif
+			#endif
 			gridDim = dim3( (img.w + N_THREADS - 1) / N_THREADS, 1 );
 			integral_col_naive <<< gridDim, blockDim >>>(d_img, img.w, img.h,
 						ipitch, opitch, dp_intg );
-#ifdef _DEBUG
+			#ifdef _DEBUG
 			__CUDA( cudaDeviceSynchronize() );
-#endif
+			#endif
 			__CUDA( cudaMemcpy2D( p_intg[0], img.w * sizeof(int), dp_intg, opitch,
 						img.w * sizeof(int), img.h, cudaMemcpyDeviceToHost ) );
 			__CUDA( cudaFree( d_img ) );
@@ -552,10 +558,49 @@ bool integralImageGPU( const Image img, unsigned int ***intimg, int method )
 		}
 		case 1: // shared memory
 		{
-			break;
+			//break;
 		}
 		case 2: // shuffle instruction
 		{
+			// allocate device memory for input data
+			__CUDA( cudaMallocPitch( &d_img, &ipitch, img.w, img.h ) );
+			__CUDA( cudaMemset2D( d_img, ipitch, 0, img.w, img.h ) );
+			__CUDA( cudaMemcpy2D( d_img, ipitch, img.img[0], img.w,
+						img.w, img.h, cudaMemcpyHostToDevice ) );
+			// allocate device memory for output data
+			__CUDA( cudaMallocPitch( &dp_intg, &opitch, img.w * sizeof(int), img.h ) );
+			__CUDA( cudaMemset2D( dp_intg, opitch, 0, img.w, img.h ) );
+			unsigned int *row_block_sum = NULL;
+			__CUDA( cudaMalloc( &row_block_sum, gridDim.x * sizeof(int) * img.h ) );
+			__CUDA( cudaMemset( row_block_sum, 0, gridDim.x * sizeof(int) * img.h ) );
+			// call kernel to integral in row
+			integral_row_shfl<<< gridDim, blockDim >>>( d_img, img.w, img.h,
+						ipitch, opitch, dp_intg, row_block_sum );
+			integral_row_shfl_uniform<<< dim3(1, img.h), gridDim.x >>>( row_block_sum );
+			integral_row_shfl_apply<<< gridDim, blockDim >>>( img.w, img.h, opitch, dp_intg, row_block_sum );
+			#ifdef _DEBUG
+			__CUDA( cudaDeviceSynchronize() );
+			#endif
+
+			// integral in col
+			// allocate device memory for inter-block integral
+			gridDim = dim3( (img.h + N_THREADS - 1) / N_THREADS, img.w );
+			unsigned int *col_block_sum = NULL;
+			__CUDA( cudaMalloc( &col_block_sum, gridDim.x * sizeof(int) * img.w ) );
+			__CUDA( cudaMemset( col_block_sum, 0, gridDim.x * sizeof(int) * img.w ) );
+			integral_col_shfl<<< gridDim, blockDim >>>( d_img, img.w, img.h,
+						ipitch, opitch, dp_intg, col_block_sum );
+			integral_col_shfl_uniform<<< dim3(1, img.w), gridDim.x >>>( col_block_sum );
+			integral_col_shfl_apply<<< gridDim, blockDim >>>( img.w, img.h, opitch, dp_intg, col_block_sum );
+			#ifdef _DEBUG
+			__CUDA( cudaDeviceSynchronize() );
+			#endif
+			__CUDA( cudaMemcpy2D( p_intg[0], img.w * sizeof(int), dp_intg, opitch,
+						img.w * sizeof(int), img.h, cudaMemcpyDeviceToHost ) );
+			__CUDA( cudaFree( d_img ) );
+			__CUDA( cudaFree( dp_intg ) );
+			__CUDA( cudaFree( row_block_sum ) );
+			__CUDA( cudaFree( col_block_sum ) );
 			break;
 		}
 	}
@@ -730,7 +775,8 @@ __global__ void integral_col_naive( const unsigned char* img, size_t w,
 }
 
 
-__global__ void integral_row_shfl( const Image img, unsigned int **intimg, unsigned int **block_sum )
+__global__ void integral_row_shfl( const unsigned char* img, size_t w, size_t h,
+	 				size_t ipitch, size_t opitch, unsigned int *intimg, unsigned int *block_sum )
 {
 	__shared__ unsigned int sum[N_THREADS];
 
@@ -738,8 +784,9 @@ __global__ void integral_row_shfl( const Image img, unsigned int **intimg, unsig
 	int h_idx = blockIdx.y;
 	int lane_id = (blockIdx.x * blockDim.x + threadIdx.x) % warpSize;
 	int warp_id = threadIdx.x / warpSize;
+	int _opitch = opitch / sizeof(int);
 
-	unsigned int val = img.img[h_idx][w_idx];
+	unsigned int val = img[h_idx * ipitch + w_idx];
 	sum[threadIdx.x] = 0;
 	__syncthreads();
 
@@ -765,24 +812,27 @@ __global__ void integral_row_shfl( const Image img, unsigned int **intimg, unsig
 
 	val += thread_val;
 
-	intimg[h_idx][w_idx] = val;
+	intimg[h_idx * _opitch + w_idx] = val;
 
 	if (block_sum != NULL && threadIdx.x == blockDim.x - 1)
 	{
-		block_sum[h_idx][blockIdx.x] = val;
+		block_sum[h_idx * gridDim.x + blockIdx.x] = val;
 	}
 }
 
 
-__global__ void integral_col_shfl( const Image img, unsigned int **intimg, unsigned int **block_sum )
+__global__ void integral_col_shfl( const unsigned char* img, size_t w, size_t h,
+	 				size_t ipitch, size_t opitch, unsigned int *intimg, unsigned int *block_sum )
 {
 	__shared__ unsigned int sum[N_THREADS];
 	int w_idx = blockIdx.y;
 	int h_idx = blockIdx.x * blockDim.x + threadIdx.x;
 	int lane_id = h_idx % warpSize;
 	int warp_id = threadIdx.x / warpSize;
+	int _opitch = opitch / sizeof(int);
 
-	unsigned int val = intimg[h_idx][w_idx];
+	if (h_idx >= h) return;
+	unsigned int val = intimg[h_idx * _opitch + w_idx];
 	sum[threadIdx.x] = 0;
 	__syncthreads();
 
@@ -809,16 +859,16 @@ __global__ void integral_col_shfl( const Image img, unsigned int **intimg, unsig
 
 	val += thread_val;
 
-	intimg[h_idx][w_idx] = val;
+	intimg[h_idx * _opitch + w_idx] = val;
 
 	if (threadIdx.x == blockDim.x - 1)
 	{
-		block_sum[blockIdx.y][blockIdx.x] = val;
+		block_sum[blockIdx.y * gridDim.x + blockIdx.x] = val;
 	}
 }
 
 
-__global__ void integral_row_shfl_uniform( const Image img, unsigned int **intimg, unsigned int **block_sum )
+__global__ void integral_row_shfl_uniform( unsigned int *block_sum )
 {
 	__shared__ unsigned int sum[N_THREADS];
 
@@ -827,7 +877,7 @@ __global__ void integral_row_shfl_uniform( const Image img, unsigned int **intim
 	int lane_id = (blockIdx.x * blockDim.x + threadIdx.x) % warpSize;
 	int warp_id = threadIdx.x / warpSize;
 
-	unsigned int val = block_sum[h_idx][blockIdx.x];
+	unsigned int val = block_sum[h_idx * blockDim.x + threadIdx.x];
 	sum[threadIdx.x] = 0;
 	__syncthreads();
 
@@ -853,12 +903,12 @@ __global__ void integral_row_shfl_uniform( const Image img, unsigned int **intim
 
 	val += thread_val;
 
-	block_sum[blockIdx.y][threadIdx.x] = val;
+	block_sum[blockIdx.y * blockDim.x + threadIdx.x] = val;
 
 }
 
 
-__global__ void integral_col_shfl_uniform( const Image img, unsigned int **intimg, unsigned int **block_sum )
+__global__ void integral_col_shfl_uniform( unsigned int *block_sum )
 {
 	__shared__ unsigned int sum[N_THREADS];
 
@@ -867,7 +917,7 @@ __global__ void integral_col_shfl_uniform( const Image img, unsigned int **intim
 	int lane_id = h_idx % warpSize;
 	int warp_id = threadIdx.x / warpSize;
 
-	unsigned int val = block_sum[blockIdx.y][blockIdx.x];
+	unsigned int val = block_sum[blockIdx.y * blockDim.x + threadIdx.x];
 	sum[threadIdx.x] = 0;
 	__syncthreads();
 
@@ -894,29 +944,33 @@ __global__ void integral_col_shfl_uniform( const Image img, unsigned int **intim
 
 	val += thread_val;
 
-	block_sum[blockIdx.y][threadIdx.x] = val;
+	block_sum[blockIdx.y * blockDim.x + threadIdx.x] = val;
 
 }
 
-__global__ void integral_row_shfl_apply( const Image img, unsigned int **intimg, unsigned int **block_sum )
+__global__ void integral_row_shfl_apply( size_t w, size_t h, size_t pitch,
+	 													unsigned int *intimg, unsigned int *block_sum )
 {
 	int w_idx = blockIdx.x * blockDim.x + threadIdx.x;
 	int h_idx = blockIdx.y;
+	int _pitch = pitch / sizeof(int);
 
 	if (blockIdx.x > 0)
 	{
-		intimg[h_idx][w_idx] += block_sum[blockIdx.y][blockIdx.x-1];
+		intimg[h_idx * _pitch + w_idx] += block_sum[blockIdx.y * gridDim.x + blockIdx.x-1];
 	}
 }
 
 
-__global__ void integral_col_shfl_apply( const Image img, unsigned int **intimg, unsigned int **block_sum )
+__global__ void integral_col_shfl_apply( size_t w, size_t h, size_t pitch,
+	 													unsigned int *intimg, unsigned int *block_sum )
 {
 	int w_idx = blockIdx.y;
 	int h_idx = blockIdx.x * blockDim.x + threadIdx.x;
+	int _pitch = pitch / sizeof(int);
 
-	if (blockIdx.x > 0)
+	if (blockIdx.x > 0 && h_idx < h)
 	{
-		intimg[h_idx][w_idx] += block_sum[blockIdx.y][blockIdx.x-1];
+		intimg[h_idx * _pitch + w_idx] += block_sum[blockIdx.y * gridDim.x + blockIdx.x-1];
 	}
 }
