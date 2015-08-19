@@ -1,4 +1,4 @@
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <stdlib.h>
 #include <memory.h>
 
@@ -37,12 +37,21 @@ int main(void)
 	gpu_method = 2;
 	unsigned int **intimg = NULL;
 	unsigned int **d_intimg = NULL;
-	if (!integralImageCPU( img0, &intimg ))
-		printf( "Integral Image CPU failed.\n" );
-	if (!integralImageGPU( img0, &d_intimg, gpu_method ))
-		printf( "Integral Image GPU failed.\n" );
-
 	bool eq = true;
+
+	printf( "\n" );
+	printf( "[Integral Image]\n(GPU method %d : %s)\n", gpu_method, integral_kernel_desc[gpu_method] );
+	if (!integralImageCPU( img0, &intimg ))
+	{
+		printf( "Integral Image CPU failed.\n" );
+		eq = false;
+	}
+	if (!integralImageGPU( img0, &d_intimg, gpu_method ))
+	{
+		printf( "Integral Image GPU failed.\n" );
+		eq = false;
+	}
+
 	int diff = 0;
 	for (int i=0; i<img0.h; ++i)
 	{

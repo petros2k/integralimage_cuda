@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 
 #define __CUDA(F) do { cudaError_t e = (F); \
